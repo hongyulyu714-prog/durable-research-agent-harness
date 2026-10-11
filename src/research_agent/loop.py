@@ -28,6 +28,8 @@ class ToolRegistry(Protocol):
 
     def validate_calls(self, calls: Sequence[ToolCall]) -> Sequence[ToolResult]: ...
 
+    def get_spec(self, name: str) -> Any | None: ...
+
 
 ToolExecutor = Callable[
     [Sequence[ToolCall]], Awaitable[Sequence[ToolResult]] | Sequence[ToolResult]
@@ -40,6 +42,12 @@ class ToolScheduler(Protocol):
     def execute(
         self, calls: Sequence[ToolCall]
     ) -> Awaitable[Sequence[ToolResult]] | Sequence[ToolResult]: ...
+
+
+class ApprovalGate(Protocol):
+    """Durably pauses a run before a write-capable tool can execute."""
+
+    def request_approval(self, state: RunState, call: ToolCall) -> RunState: ...
 
 
 def tool_result_message(result: ToolResult) -> dict[str, str]:
@@ -68,6 +76,7 @@ class AgentLoop:
         executor: ToolExecutor | ToolScheduler,
         *,
         max_steps: int = 8,
+        approval_gate: ApprovalGate | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least one")
@@ -75,6 +84,7 @@ class AgentLoop:
         self.registry = registry
         self.executor: ToolExecutor = executor if callable(executor) else executor.execute
         self.max_steps = max_steps
+        self.approval_gate = approval_gate
 
     async def run(self, state: RunState) -> RunState:
         """Run only while active; terminal and paused states are left unchanged.
@@ -108,14 +118,52 @@ class AgentLoop:
                 break
 
             state.messages.append(response.assistant_message())
+            pending_writes = self._pending_writes(response.tool_calls)
+            if pending_writes:
+                # Settle every call that is not awaiting human approval before
+                # pausing.  Otherwise the assistant tool-call message would
+                # contain read calls with no matching tool result.
+                pending_ids = {call.id for call in pending_writes}
+                automatic_calls = [
+                    call for call in response.tool_calls if call.id not in pending_ids
+                ]
+                self._append_results(state, await self._process_calls(automatic_calls))
+                state.pending_calls = pending_writes[1:]
+                self.approval_gate.request_approval(state, pending_writes[0])
+                break
             results = await self._process_calls(response.tool_calls)
-            for result in results:
-                state.messages.append(tool_result_message(result))
-                state.completed_call_ids.add(result.tool_call_id)
-                state.record("tool_result", tool_call_id=result.tool_call_id, ok=result.ok)
+            self._append_results(state, results)
             state.step += 1
 
         return state
+
+    def _pending_writes(self, calls: Sequence[ToolCall]) -> list[ToolCall]:
+        """Return every validated write call that must wait for a human.
+
+        Validation happens for the whole response before partitioning it.  This
+        keeps invalid writes model-visible errors, executes safe reads in the
+        same turn, and persists only genuine writes in their original order.
+        """
+
+        if self.approval_gate is None or len({call.id for call in calls}) != len(calls):
+            return []
+        validation_results = list(self.registry.validate_calls(calls))
+        self._validate_result_ids(validation_results, calls, source="validator")
+        validation_results = self._match_result_names(validation_results, calls, source="validator")
+        rejected_ids = {result.tool_call_id for result in validation_results}
+        writes: list[ToolCall] = []
+        for call in calls:
+            spec = self.registry.get_spec(call.name)
+            if spec is not None and spec.risk == "write" and call.id not in rejected_ids:
+                writes.append(call)
+        return writes
+
+    @staticmethod
+    def _append_results(state: RunState, results: Sequence[ToolResult]) -> None:
+        for result in results:
+            state.messages.append(tool_result_message(result))
+            state.completed_call_ids.add(result.tool_call_id)
+            state.record("tool_result", tool_call_id=result.tool_call_id, ok=result.ok)
 
     async def _process_calls(self, calls: Sequence[ToolCall]) -> list[ToolResult]:
         """Validate, execute valid calls, and restore original call ordering."""
