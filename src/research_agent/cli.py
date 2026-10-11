@@ -29,12 +29,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser("run", help="start a research task")
     run_parser.add_argument("task", help="natural-language task")
+    run_parser.add_argument(
+        "--workspace",
+        required=True,
+        help="directory that contains the data/ and reports/ tool boundaries",
+    )
 
     resume_parser = subparsers.add_parser("resume", help="resume a paused run")
     resume_parser.add_argument("run_id")
     decision = resume_parser.add_mutually_exclusive_group(required=True)
     decision.add_argument("--approve", action="store_true")
     decision.add_argument("--reject", metavar="REASON")
+    resume_parser.add_argument(
+        "--workspace",
+        required=True,
+        help="the same workspace directory used when the run was started",
+    )
 
     inspect_parser = subparsers.add_parser("inspect", help="show a run summary")
     inspect_parser.add_argument("run_id")
@@ -81,8 +91,21 @@ class ApplicationService:
 def main(argv: list[str] | None = None, *, service: ApplicationService | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
-    app = service or ApplicationService(StateStore(Path(args.runs_dir)))
     try:
+        if service is not None:
+            app = service
+        elif args.command == "inspect":
+            # Inspection is entirely local and must remain available even if
+            # provider credentials have expired or are not configured.
+            app = ApplicationService(StateStore(Path(args.runs_dir)))
+        else:
+            # Imported lazily to keep this CLI module usable as the lightweight
+            # application-service boundary in offline unit tests.
+            from research_agent.runtime import build_application_service
+
+            app = build_application_service(
+                runs_dir=Path(args.runs_dir), workspace=args.workspace
+            )
         if args.command == "run":
             state = asyncio.run(app.run(args.task))
             print(f"{state.status.value}: {state.run_id}")
