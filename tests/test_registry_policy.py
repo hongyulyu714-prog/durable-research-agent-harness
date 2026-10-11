@@ -13,10 +13,11 @@ from research_agent.tools.files import read_file, write_report
 
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
-    (tmp_path / "data").mkdir()
-    (tmp_path / "reports").mkdir()
-    (tmp_path / "data" / "source.txt").write_text("trusted local research", encoding="utf-8")
-    return tmp_path
+    root = tmp_path / "workspace"
+    (root / "data").mkdir(parents=True)
+    (root / "reports").mkdir()
+    (root / "data" / "source.txt").write_text("trusted local research", encoding="utf-8")
+    return root
 
 
 @pytest.mark.asyncio
@@ -51,6 +52,29 @@ async def test_file_tools_reject_symlink_escape(workspace: Path, tmp_path: Path)
 
     with pytest.raises(WorkspacePathError):
         await read_file("escape.txt", workspace=workspace)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_root", ["data", "reports"])
+async def test_file_tools_reject_workspace_root_symlink_escape(
+    workspace: Path, tmp_path: Path, tool_root: str
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = workspace / tool_root
+    if tool_root == "data":
+        (root / "source.txt").unlink()
+    root.rmdir()
+    root.symlink_to(outside, target_is_directory=True)
+
+    if tool_root == "data":
+        with pytest.raises(WorkspacePathError):
+            await read_file("escaped.txt", workspace=workspace)
+    else:
+        with pytest.raises(WorkspacePathError):
+            await write_report("escaped.md", "must not escape", workspace=workspace)
+
+    assert not list(outside.iterdir())
 
 
 def test_schemas_are_openai_compatible_and_validation_is_model_visible(workspace: Path) -> None:
