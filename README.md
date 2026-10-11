@@ -1,120 +1,161 @@
-# 🧭 Durable Research Agent Harness
+# Durable Research Agent Harness
 
 <p align="center">
-  <img src="docs/images/durable-agent-hero.png" alt="一位研究者与研究 Agent 协作；资料、工具、检查点、审批和报告环绕在旁" width="100%" />
+  <img src="docs/images/durable-agent-hero.png" alt="研究者与可恢复研究 Agent 协作的插图" width="100%" />
 </p>
 
 <p align="center">
   <strong>一个从零实现、可恢复、可审计的研究型 Agent Harness。</strong><br />
-  <sub>让模型负责动脑，让 Harness 负责掌舵；聪明也要有刹车。</sub>
+  <sub>模型负责提出行动建议；控制流、权限边界、持久化与副作用管理由项目代码负责。</sub>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+" />
   <img src="https://img.shields.io/badge/tests-44%20passed-22C55E" alt="44 tests passed" />
-  <img src="https://img.shields.io/badge/control%20loop-project--owned-8B5CF6" alt="Project-owned control loop" />
-  <img src="https://img.shields.io/badge/agent%20framework-none-F97316" alt="No agent framework" />
+  <img src="https://img.shields.io/badge/Agent%20loop-project--owned-8B5CF6" alt="Project-owned agent loop" />
+  <img src="https://img.shields.io/badge/Agent%20framework-none-F97316" alt="No agent framework" />
 </p>
 
-> **一句话概括：** 这是一个会动脑、会等人点头、断电后还能找回进度条的小型研究 Agent。它能异步调用工具、在副作用前等待人工审批、把状态原子落盘，并在新进程中安全恢复。
-
 ---
 
-## 🏅 这份作品想证明什么？
+## 项目概述
 
-我没有把重点放在“再接几个工具”，而是把它当作一次小型 Agent 基础设施设计：**让不完全可靠的模型，运行在边界清晰、可恢复、可复核的系统里。**
+`Durable Research Agent Harness` 是一个面向研究资料整理场景的轻量级 Agent 原型。它使用 OpenAI-compatible Chat Completions API 获取模型的文本和工具调用提议，但不依赖 LangChain、LangGraph、OpenAI Agents SDK 或其他 Agent 框架来控制执行流程。
 
-| 我的工程亮点 | 在仓库里的落点 | 为什么这很重要 |
+项目关注的不是增加工具数量，而是回答 Agent 系统工程中更基础的问题：
+
+- 模型提出工具调用后，谁负责校验、执行与回填结果？
+- 多个独立工具如何并发运行，同时避免一个失败取消其他健康调用？
+- 对文件写入等副作用，如何引入人工审批并支持跨进程恢复？
+- 发生崩溃时，如何避免不安全地重复执行已经可能产生副作用的调用？
+- 执行过程如何留下不暴露密钥和正文内容的可检查证据？
+
+本仓库通过一个小而完整的控制平面实现这些能力：模型只能提出下一步；工具策略、状态迁移、审批和持久化均由 Harness 固定执行。
+
+## 核心亮点
+
+| 能力 | 实现位置 | 工程价值 |
 |---|---|---|
-| 🎮 **控制权留在自己手里** | `AgentLoop` 是项目自写的多轮控制平面；没有让 Agent 框架接管执行语义。 | 模型只能提议，不能自行获得权限或偷偷改流程。 |
-| 🧯 **把最难的崩溃窗口摊在桌面上** | `ApprovalService` 在写入前持久化执行栅栏；故障注入测试验证恢复时拒绝盲重试。 | 不把“exactly-once”当口号，而是诚实处理副作用已经发生但结果尚未落盘的真实风险。 |
-| ⚡ **异步不是装饰品** | `AsyncToolScheduler` 对独立只读调用并发执行，并保存耗时与失败元数据。 | 能用测试证明并发，也能保证一个网页失败不会带崩同批工具。 |
-| 🧱 **把安全写成静态能力，而非提示词愿望** | `ToolSpec`、路径边界、SSRF 防护、审批策略和 schema 校验都在 Harness 侧。 | 无论模型怎么“发挥”，它都不能越过文件、网络和写入权限的护栏。 |
-| 🔍 **每个主张都有小票** | `MockLLM` 离线测试、真实 API 冒烟验证、JSONL 轨迹与 `summary.json`。 | 44 项确定性测试把关键行为变成可复验事实，而不是 demo 的一次偶然成功。 |
+| 自主多轮 Agent Loop | `src/research_agent/loop.py` | `AgentLoop` 自行驱动“模型提议 → 工具结果 → 下一轮模型 → 结束/暂停”的控制链，不依赖预编排 workflow。 |
+| 异步并发与故障隔离 | `scheduler.py` | 独立只读工具可并发执行；超时、网络错误或参数错误会被转换为结构化 `ToolResult`，不会取消同批其他调用。 |
+| Human-in-the-loop | `state_store.py` | 写入工具必须进入 `waiting_approval`；批准或拒绝后才恢复，且恢复时只执行已持久化的原始调用。 |
+| 可恢复状态机 | `models.py`、`state_store.py` | RunState 可 JSON 序列化，checkpoint 原子写入；新服务实例可以仅依赖 `run_id` 加载并继续。 |
+| 保守的副作用语义 | `ApprovalService` | 写入执行前落盘执行栅栏。若进程在写入完成、结果 checkpoint 保存前中断，恢复会拒绝盲目重试。 |
+| 工具安全边界 | `registry.py`、`tools/` | Schema 校验、工作区路径边界、软链接防护和公开 URL 安全策略均不受模型文本控制。 |
+| 可观测性与证据 | `trace.py`、`tests/` | 生成脱敏 JSONL 轨迹与摘要；关键语义由 44 项确定性离线测试覆盖。 |
 
-> **我希望审阅者看到的不是“一个会聊天的脚本”，而是一位知道 Agent 在什么时候最容易失控、并愿意把安全带提前系好的人。**
-
----
-
-## ✨ 这个小家伙厉害在哪？
-
-很多 Agent 原型的剧情是“模型说一句，工具冲出去”。本项目的主角却是 **Harness**：即使模型、网络或进程偶尔耍小脾气，系统仍应回答三个很现实的问题——现在做到哪一步？刚刚有没有真的写文件？下一步还安全吗？
-
-| 🌈 招式 | 幕后机关 | 所以呢？ |
-|---|---|---|
-| 🧠 自主多轮 Loop | `AgentLoop` 接收模型的工具提议、执行/回填结果，再决定继续、暂停或完成。 | 不是预先硬编码的静态工作流。 |
-| ⚡ 真正异步 | 独立只读工具通过 `AsyncToolScheduler` 并发；单个失败会转为结构化结果。 | 并发、超时、重试与失败隔离都有可测证据。 |
-| ✋ Human-in-the-loop | `write_report` 属于写入能力，普通调度器永远不会直接执行。 | 人工明确批准或拒绝副作用。 |
-| 💾 可恢复执行 | 待批准调用先写入原子 checkpoint；新的服务实例可只凭 `run_id` 恢复。 | 进程退出不等于任务状态丢失。 |
-| 🛡️ 安全边界 | 工具 schema、路径范围、SSRF 防护和审批策略全部由 Harness 固定。 | 模型文本无法扩权。 |
-| 🔎 可观测性 | 脱敏 JSONL 轨迹与摘要记录状态、批次、审批和工具元数据。 | 可以复核执行过程，而非相信口头描述。 |
-
-### 我们不卖“exactly-once 魔法”
-
-在“文件已经写入，但写入结果的 checkpoint 尚未落盘”这个无法完全消除的崩溃窗口中，系统会留下持久化执行栅栏，并在恢复时 **拒绝盲目重试**。宁可请人类先看一眼目标文件，也不为了一个听起来很酷的词而偷偷写第二遍。
+> 项目不将“模型能调用工具”视为完成；重点在于让工具调用具备可控、可解释和可恢复的执行语义。
 
 ---
 
-## 🎨 一张图看完小剧场
+## 系统架构
 
 <p align="center">
-  <img src="docs/images/durable-agent-workflow.png" alt="从任务、并发工具、检查点、人工审批到报告和轨迹的可恢复 Agent 工作流" width="100%" />
+  <img src="docs/images/durable-agent-technical-roadmap.png" alt="命令行、模型、Agent 控制循环、工具校验、并发调度、人工审批、持久化与审计轨迹的技术路线图" width="100%" />
 </p>
-
-1. **模型先举手**：它可以请求读取本地资料或抓取公开网页。
-2. **Harness 先验票**：参数不合法会变成模型可见的 `ToolResult`；独立只读工具可以并发。
-3. **要写东西？先存档**：一旦出现 `write_report`，系统保存准确调用并转为 `waiting_approval`。
-4. **人类最后拍板**：批准时只执行保存的调用；拒绝时把原因回填给模型。
-5. **留好小票再收工**：新进程可以加载 checkpoint，`events.jsonl` 与 `summary.json` 留下脱敏证据。
-
----
-
-## 🗺️ 技术路线图：谁来动脑，谁来踩刹车？
 
 ```text
-                         ┌────────────────────────────┐
-                         │     User / CLI command     │
-                         │    run · resume · inspect  │
-                         └─────────────┬──────────────┘
-                                       │
-                                       ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Project-owned Harness                        │
+                         User / CLI
+                    run · resume · inspect
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                        Project-owned Harness                          │
 │                                                                      │
-│  AgentLoop ◄──────► LLM adapter (OpenAI-compatible / MockLLM)       │
+│  AgentLoop ◄────────► LLM Adapter                                   │
+│      │                    OpenAICompatibleLLM / MockLLM             │
 │      │                                                               │
-│      ├── ToolRegistry ──► schema validation + static policy          │
-│      ├── AsyncToolScheduler ──► concurrency / timeout / retry        │
-│      ├── ApprovalService ──► human decision + retry fence            │
-│      ├── StateStore ──► atomic checkpoint.json                       │
-│      └── TraceRecorder ──► redacted events.jsonl + summary.json      │
-└─────────────────────────────────────────────────────────────────────┘
-                                       │
-                                       ▼
-                  read_file · fetch_url · write_report
+│      ├── ToolRegistry       schema、参数校验、静态工具策略            │
+│      ├── AsyncToolScheduler 并发、超时、重试、失败隔离               │
+│      ├── ApprovalService    审批、恢复、执行栅栏                     │
+│      ├── StateStore         原子 checkpoint.json                     │
+│      └── TraceRecorder      脱敏 events.jsonl / summary.json         │
+└──────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+                 read_file · fetch_url · write_report
 ```
 
-<p align="center">
-  <img src="docs/images/durable-agent-technical-roadmap.png" alt="从命令行、模型提议、控制循环、工具校验和并发调度，到审批、持久化、恢复、报告和轨迹的技术路线图" width="100%" />
-</p>
+### 组件职责
 
-图里没有塞进难读的小字，源码路径在这里乖乖对号入座：终端是 CLI，云朵是 LLM adapter，绿色环形机器人是 `AgentLoop`；下方收纳柜是 `ToolRegistry`；文件夹和地球是 `AsyncToolScheduler` 的并发工具；印章是 `ApprovalService`；蓝色保险箱和回转箭头是 `StateStore`；紫色长卷则是 `TraceRecorder` 的审计轨迹。
-
-| 组件 | 职责 | 模型能否绕过？ |
-|---|---|---:|
-| `AgentLoop` | 驱动多轮提议、工具结果回填、终止与暂停状态。 | 否 |
-| `ToolRegistry` | 发布工具 schema，并校验每一次模型来源参数。 | 否 |
-| `AsyncToolScheduler` | 让安全的只读调用并发，隔离超时与失败。 | 否 |
-| `ApprovalService` | 对写入调用持久化、审批、恢复及防重复执行。 | 否 |
-| `StateStore` / `TraceRecorder` | 形成原子 checkpoint 与脱敏审计证据。 | 否 |
+| 组件 | 职责 | 关键约束 |
+|---|---|---|
+| `OpenAICompatibleLLM` | 将兼容 API 的 Chat Completions 响应转换为项目内部 `LLMResponse`。 | 仅负责一次模型请求；不拥有 loop 或工具执行权。 |
+| `AgentLoop` | 管理多轮状态、调用模型、处理工具结果、暂停审批和终止条件。 | 最大步数受限；未知工具或无效参数以模型可见失败结果回填。 |
+| `ToolRegistry` | 保存工具定义、输出 OpenAI tool schema、验证模型来源参数。 | 只暴露已注册工具；参数必须通过严格的 JSON Schema 子集校验。 |
+| `AsyncToolScheduler` | 执行有效的只读调用并收集结果。 | 仅并发 `parallel_safe` 调用；将超时/异常转换为结构化结果。 |
+| `ApprovalService` | 对写入调用进行审批、拒绝、恢复和副作用保护。 | 只使用 checkpoint 中的待审批调用，不接受恢复时替换参数。 |
+| `StateStore` | 保存与加载 `RunState`。 | 通过临时文件、`fsync`、原子替换保存 checkpoint。 |
+| `TraceRecorder` | 输出可复核的事件和摘要。 | 对密钥及工具正文做脱敏或摘要化，避免泄露运行内容。 |
 
 ---
 
-## 🚀 五分钟开箱小实验
+## 执行生命周期
 
-### 1) 给它装上小背包
+<p align="center">
+  <img src="docs/images/durable-agent-workflow.png" alt="Agent 从任务、工具执行、检查点、人工审批到报告和轨迹的执行流程" width="100%" />
+</p>
 
-要求：**Python 3.11+**。
+### 状态机
+
+| 状态 | 含义 | 可达后续状态 |
+|---|---|---|
+| `running` | Agent 正在请求模型、处理工具调用或继续执行。 | `waiting_approval`、`completed`、`failed` |
+| `waiting_approval` | 已保存写入调用，正在等待人工批准或拒绝。 | `running`、`failed` |
+| `completed` | 模型给出最终回答，或审批后的 continuation 已完成。 | 终态 |
+| `failed` | 达到最大步数、模型响应无效或出现无法恢复的错误。 | 终态 |
+| `cancelled` | 为运行状态预留的取消终态。 | 终态 |
+
+### 正常执行路径
+
+1. 用户通过 CLI 提交自然语言任务；系统创建 `RunState`。
+2. `AgentLoop` 向模型发送已有消息和当前可用工具 schema。
+3. 对只读调用，Harness 校验参数后由 scheduler 执行，并把 `ToolResult` 追加为 `role=tool` 消息。
+4. 若模型提出 `write_report`，Harness 在执行前将完整调用写入 checkpoint，并把状态切换为 `waiting_approval`。
+5. 用户在相同或新的进程中使用 `resume` 批准或拒绝该调用。
+6. 批准时，`ApprovalService` 只执行保存的调用；随后 Agent 可以继续请求模型并产生最终回答。
+7. 每个阶段都可在 `events.jsonl` 与 `summary.json` 中检查。
+
+### 崩溃窗口与恢复策略
+
+系统不声称无法证明的 exactly-once 语义。对于“文件已经写入，但写入结果尚未成功保存”这一窗口，恢复策略是：
+
+1. 在执行写入工具前，将 `approval_execution_started=true` 持久化。
+2. 如果之后发生中断，新进程加载 checkpoint 时仍能看到这个执行栅栏。
+3. 再次 `resume --approve` 会抛出 `ApprovalRecoveryRequired`，而不是自动重复写入。
+4. 操作者必须先检查报告目标，再决定如何处置。
+
+该语义牺牲了自动重试的便利性，换取对重复副作用的保守保护。
+
+---
+
+## 内置工具与安全边界
+
+| 工具 | 能力范围 | 风险等级 | 安全控制 |
+|---|---|---:|---|
+| `read_file(path)` | 读取工作区 `data/` 下的 UTF-8 文本。 | `read` | 路径必须位于 `data/`；路径逃逸和指向工作区外的软链接会被拒绝。 |
+| `fetch_url(url)` | 异步获取公开 HTTP(S) 页面中的受限文本。 | `read` | 拒绝 localhost、私网、metadata 地址和不安全重定向；限制响应体大小。 |
+| `write_report(path, content)` | 写入工作区 `reports/` 下已存在的目录。 | `write` | 需要人工审批；普通 scheduler 无法直接执行；恢复时使用保存的调用参数。 |
+
+`ToolSpec` 是策略信任边界。模型可以提出调用，但不能通过提示词、参数或工具名称改变下列事项：
+
+- 工具是否存在；
+- 参数 schema 与允许字段；
+- 文件系统访问范围；
+- 是否允许并发、超时与重试策略；
+- 是否需要人工审批。
+
+---
+
+## 安装与配置
+
+### 环境要求
+
+- Python 3.11 或更高版本
+- 一个兼容 Chat Completions 的模型服务
+- 用于真实运行的 `OPENAI_API_KEY` 与 `OPENAI_MODEL`
+
+### 安装依赖
 
 ```bash
 python3.11 -m venv .venv
@@ -122,19 +163,35 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-### 2) 告诉它去哪里找模型
-
-复制模板后填入你的 OpenAI-compatible 凭据：
+### 配置模型服务
 
 ```bash
 cp .env.example .env
-# 编辑 .env：OPENAI_API_KEY、OPENAI_MODEL；可选 OPENAI_BASE_URL
+```
+
+编辑 `.env`：
+
+```dotenv
+OPENAI_API_KEY=your_api_key
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=your_model_name
+```
+
+加载变量：
+
+```bash
 set -a; source .env; set +a
 ```
 
-`.env` 已被 Git 忽略。不要提交密钥、私密任务正文、未审查网页资料或真实运行 checkpoint。
+`.env` 已被 Git 忽略。请勿提交密钥、真实任务正文、未经审核的网页资料或运行产生的 checkpoint。
 
-### 3) 画出它的安全活动区
+---
+
+## 快速开始
+
+### 1. 准备工作区
+
+工作区将数据读取和报告写入分隔到两个显式目录：
 
 ```bash
 mkdir -p demo-workspace/data demo-workspace/reports demo-runs
@@ -142,9 +199,7 @@ printf 'Durable execution makes research workflows inspectable.\n' \
   > demo-workspace/data/source.txt
 ```
 
-工具边界是固定的：`read_file` 只能读 `data/`，`write_report` 只能写 `reports/`。
-
-### 4) 发令，开跑！
+### 2. 启动任务
 
 ```bash
 research-agent --runs-dir demo-runs run \
@@ -152,49 +207,64 @@ research-agent --runs-dir demo-runs run \
   --workspace demo-workspace
 ```
 
-当 CLI 返回以下状态时，说明写入提议已经安全保存、等待人类决定：
+如果模型提出写入报告，命令会输出：
 
 ```text
 waiting_approval: <run_id>
 ```
 
-### 5) 人类最终拍板
+此时 `demo-runs/<run_id>/checkpoint.json` 已保存待审批调用；报告尚未写入。
 
-批准已保存的写入：
+### 3. 审批、拒绝或检查
+
+批准写入：
 
 ```bash
 research-agent --runs-dir demo-runs resume <run_id> --approve \
   --workspace demo-workspace
 ```
 
-或者拒绝，并将原因作为结构化结果回传给模型：
+拒绝写入并提供原因：
 
 ```bash
 research-agent --runs-dir demo-runs resume <run_id> \
   --reject "请先缩短为三段" --workspace demo-workspace
 ```
 
-任何时候都可以在 **没有 API Key** 的环境检查本地状态：
+检查任意运行摘要（不需要 API Key）：
 
 ```bash
 research-agent --runs-dir demo-runs inspect <run_id>
 ```
 
+### CLI 命令参考
+
+| 命令 | 用途 | 是否要求模型凭据 |
+|---|---|---:|
+| `research-agent run TASK --workspace PATH` | 创建并执行一次新任务。 | 是 |
+| `research-agent resume RUN_ID --approve --workspace PATH` | 批准并恢复待审批任务。 | 取决于后续是否需要模型继续执行。 |
+| `research-agent resume RUN_ID --reject REASON --workspace PATH` | 拒绝调用，并将原因作为工具结果回填。 | 取决于后续是否需要模型继续执行。 |
+| `research-agent inspect RUN_ID` | 输出本地运行摘要。 | 否 |
+
 ---
 
-## 🧰 三件工具，三道护栏
+## 运行记录与可观测性
 
-| 工具 | 能力范围 | 关键防护 |
+每个 run 保存在 `runs/<run_id>/` 下：
+
+| 文件 | 内容 | 用途 |
 |---|---|---|
-| `read_file(path)` | 读取工作区 `data/` 下的 UTF-8 文本。 | 路径边界校验，拒绝借由软链接逃逸。 |
-| `fetch_url(url)` | 异步读取受限大小的公开 HTTP(S) 文本。 | 拒绝本地、私网、metadata 地址与不安全重定向。 |
-| `write_report(path, content)` | 写入工作区 `reports/` 下已存在的目录。 | 需要审批；普通 scheduler 不能调用；恢复时使用已持久化参数。 |
+| `checkpoint.json` | 完整、可序列化的 `RunState`。 | 恢复运行、检查待审批调用和状态机。 |
+| `events.jsonl` | 追加式、脱敏的事件流。 | 审计 loop、工具批次、审批与恢复路径。 |
+| `summary.json` | 事件数、工具失败数、审批决策等概要。 | 快速检查运行结论。 |
 
-`ToolSpec` 是策略信任边界：模型的自然语言、工具参数和提示词都不能改变写入审批、并发策略、重试次数或文件系统访问范围。
+轨迹记录避免直接写入工具正文、请求参数正文和密钥：敏感字段会被替换为 `[REDACTED]`，内容字段仅保留长度和短哈希。这样既支持验证执行路径，也尽量降低日志泄露风险。
 
 ---
 
-## 🧪 不靠口号，靠测试小票
+## 测试与验证
+
+完整测试集离线、确定性执行，不需要 API Key：
 
 ```bash
 PYTHONPATH=src python3.11 -m pytest -q
@@ -202,65 +272,59 @@ python3.11 -m ruff check src tests
 python3.11 -m compileall -q src tests
 ```
 
-当前测试集为 **44 项**，全程离线、确定性执行，不需要 API Key。
+当前结果：**44 passed**。
 
-| 验证场景 | 关键断言 |
+| 验证类别 | 代表性覆盖 |
 |---|---|
-| 多轮 Agent Loop | 模型提议、工具结果回填、最终回答形成完整闭环。 |
-| 并发与失败隔离 | 本地读取与网页调用真实重叠；网页失败不会取消健康调用。 |
-| 参数与工具防御 | 未知工具、无效 schema、工具名/调用 ID 不匹配都会变成安全的结构化失败。 |
-| 人工审批 | 写入前不会执行；批准/拒绝都产生可检查状态。 |
-| 新进程恢复 | 新的 `ApplicationService` 仅靠 checkpoint 恢复并写入一次报告。 |
-| 崩溃窗口 | 写入完成而结果 checkpoint 未保存时，恢复栅栏会拒绝重试，防止第二次副作用。 |
-| 脱敏轨迹 | trace 不记录工具内容、参数正文或密钥。 |
+| Agent Loop | 多轮消息、工具调用回填、无效工具处理、最大步数终止。 |
+| 工具注册与策略 | schema 验证、工具 ID/名称对应、读写风险策略、路径与软链接边界。 |
+| 异步调度 | 并发执行、超时、重试、网络异常与失败隔离。 |
+| 审批与恢复 | 暂停、批准、拒绝、多写入顺序，以及新服务实例恢复。 |
+| 故障注入 | 真实临时报告写入后模拟 checkpoint 失败，验证恢复栅栏阻止重复执行。 |
+| 轨迹与摘要 | JSONL 脱敏、事件去重、状态摘要与运行证据。 |
 
-重点入口：
+重点测试入口：
 
-- [`tests/test_integration.py`](tests/test_integration.py)：并发、失败隔离、审批和跨进程恢复的完整离线流程。
-- [`tests/test_crash_recovery.py`](tests/test_crash_recovery.py)：真实临时文件与故障注入，证明恢复栅栏语义。
+- [`tests/test_integration.py`](tests/test_integration.py)：并发读取、网页失败隔离、审批暂停、跨服务恢复、轨迹与摘要。
+- [`tests/test_crash_recovery.py`](tests/test_crash_recovery.py)：真实文件写入与崩溃窗口的故障注入证明。
 
 ---
 
-## 📁 迷你项目地图
+## 项目结构
 
 ```text
 src/research_agent/
-├── loop.py          # 项目自己拥有的多轮 Agent 控制流
+├── cli.py           # run / resume / inspect 命令行入口
+├── llm.py           # OpenAI-compatible 与离线 MockLLM 适配器
+├── loop.py          # 项目拥有的多轮 Agent 控制流
+├── models.py        # RunState、状态机、工具调用与结果契约
 ├── registry.py      # 工具注册、schema 与参数验证
+├── runtime.py       # 生产组合根与环境变量配置
 ├── scheduler.py     # 异步并发、timeout、retry、失败隔离
 ├── state_store.py   # 原子 checkpoint、审批与恢复栅栏
 ├── trace.py         # 脱敏 JSONL 轨迹与摘要
-├── runtime.py       # OpenAI-compatible 运行时组合根
-└── tools/           # 文件与网页工具的安全能力边界
+└── tools/           # 文件与网页工具及其能力边界
 
-tests/                # 离线单元、集成与故障注入测试
-docs/                 # 方案、运行记录与 README 插图
+tests/                # 单元、集成与故障注入测试
+docs/                 # 详细方案、运行记录、架构插图
+examples/             # 可参考的任务与工作区示例
 ```
 
 ---
 
-## 🧑‍⚖️ 给审阅者的 90 秒导游图
+## 设计边界与后续扩展
 
-1. 看本页的“**一眼看懂运行方式**”，先理解控制权如何留在 Harness。
-2. 打开 [`src/research_agent/loop.py`](src/research_agent/loop.py)，确认没有 Agent 框架接管控制循环。
-3. 打开 [`src/research_agent/state_store.py`](src/research_agent/state_store.py)，查看 checkpoint、审批与执行栅栏。
-4. 运行 `pytest -q`，再看 `test_integration.py` 与 `test_crash_recovery.py` 的可复验证据。
-5. 任选一个 CLI demo，观察 `waiting_approval → completed` 及 `events.jsonl`。
+本项目有意将范围控制在单 Agent、三个窄工具和可验证的执行语义。它不包含向量数据库、多 Agent 编排、通用浏览器自动化或前端界面；这些能力可在稳定的控制平面之上继续扩展。
 
----
+当前明确的设计边界包括：
 
-## 🔍 这里有什么，也坦白没有什么
+- `fetch_url` 是受限资料获取工具，不是绕过站点策略的通用浏览器；
+- 写入路径必须事先创建，工具不会隐式扩大文件系统能力；
+- 副作用后的崩溃窗口采用“阻止自动重复、要求人工检查”的保守恢复策略；
+- 模型服务仅用于生成文本与工具提议，不参与权限判断或状态迁移。
 
-- 本项目刻意不包含向量数据库、多 Agent 编排、前端或复杂 RAG；它优先把单 Agent 的控制流、恢复语义和安全边界做完整。
-- `fetch_url` 是受限资料获取工具，不是通用浏览器，也不承诺绕过站点策略。
-- 系统提供的是“**副作用后崩溃时拒绝自动重复**”的保守语义，而不是对外宣称不可证明的 exactly-once。
-- 真实模型只负责产出文本与工具提议；所有权限和状态迁移仍由本仓库代码决定。
+## 参考文档
 
-更完整的设计说明见 [详细实现方案](docs/Agent_Harness_详细方案.md)，可复验的交付证据见 [运行记录](docs/运行记录.md)。
-
----
-
-<p align="center">
-  <sub>Built for inspectable, recoverable, human-governed agent execution. 🧡<br />
-  模型可以天马行空，Harness 负责把安全带系好。</sub>
-</p>
+- [详细实现方案](docs/Agent_Harness_详细方案.md)
+- [运行记录与复核说明](docs/运行记录.md)
+- [项目 GitHub 仓库](https://github.com/hongyulyu714-prog/durable-research-agent-harness)
