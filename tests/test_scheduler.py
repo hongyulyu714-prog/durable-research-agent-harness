@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import time
 
 import httpx
@@ -11,7 +12,17 @@ import pytest
 from research_agent.models import ToolCall
 from research_agent.registry import ToolHandler, ToolRegistry, ToolSpec
 from research_agent.scheduler import AsyncToolScheduler
-from research_agent.tools.web import fetch_url
+from research_agent.tools.web import UnsafeUrlError, fetch_url
+
+
+@pytest.fixture(autouse=True)
+def offline_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep web-tool tests deterministic and independent of host DNS settings."""
+
+    async def public_dns(*_: object) -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+        return {ipaddress.ip_address("8.8.8.8")}
+
+    monkeypatch.setattr("research_agent.tools.web._resolved_addresses", public_dns)
 
 
 def spec(
@@ -179,3 +190,120 @@ async def test_fetch_url_uses_mock_transport_and_reports_truncation() -> None:
         "truncated": True,
         "original_char_count": 6,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///tmp/report.txt",
+        "http://localhost:8000/",
+        "https://127.0.0.1/",
+        "https://[::1]/",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.9/",
+        "https://metadata.google.internal/computeMetadata/v1/",
+    ],
+)
+async def test_fetch_url_rejects_unsafe_targets_before_request(url: str) -> None:
+    requested = False
+
+    async def response(_: httpx.Request) -> httpx.Response:
+        nonlocal requested
+        requested = True
+        return httpx.Response(200, text="not reached")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
+        with pytest.raises(UnsafeUrlError):
+            await fetch_url(url, client=client)
+
+    assert not requested
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_checks_each_redirect_target_before_request() -> None:
+    requested_urls: list[str] = []
+
+    async def response(request: httpx.Request) -> httpx.Response:
+        requested_urls.append(str(request.url))
+        return httpx.Response(302, headers={"location": "http://127.0.0.1/admin"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
+        with pytest.raises(UnsafeUrlError):
+            await fetch_url("https://example.test/start", client=client)
+
+    assert requested_urls == ["https://example.test/start"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_rejects_hostnames_resolving_to_private_addresses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def private_dns(*_: object) -> set[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+        return {ipaddress.ip_address("192.168.1.10")}
+
+    monkeypatch.setattr("research_agent.tools.web._resolved_addresses", private_dns)
+    transport = httpx.MockTransport(lambda _: httpx.Response(200))
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(UnsafeUrlError):
+            await fetch_url("https://private-name.test/", client=client)
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_stops_streaming_after_its_byte_limit() -> None:
+    class CountingStream(httpx.AsyncByteStream):
+        def __init__(self) -> None:
+            self.chunks_read = 0
+
+        async def __aiter__(self):
+            for _ in range(20):
+                self.chunks_read += 1
+                yield b"abcd"
+
+        async def aclose(self) -> None:
+            pass
+
+    stream = CountingStream()
+
+    async def response(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
+        result = await fetch_url(
+            "https://example.test/large",
+            max_response_chars=8,
+            max_response_bytes=8,
+            client=client,
+        )
+
+    assert result == {
+        "url": "https://example.test/large",
+        "status_code": 200,
+        "text": "abcdabcd",
+        "truncated": True,
+        "original_char_count": 8,
+    }
+    assert stream.chunks_read <= 4
+    assert stream.chunks_read < 20
+
+
+@pytest.mark.asyncio
+async def test_scheduler_returns_unsafe_url_as_structured_non_retryable_error() -> None:
+    async def response(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("unsafe URL must not reach the transport")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
+        async def web_tool(url: str) -> dict[str, object]:
+            return await fetch_url(url, client=client)
+
+        registry = make_registry((spec("fetch_url", max_retries=2), web_tool))
+        result = (
+            await AsyncToolScheduler(registry).execute(
+                [ToolCall("unsafe", "fetch_url", {"url": "http://127.0.0.1/"})]
+            )
+        )[0]
+
+    assert result.error is not None
+    assert result.error.kind == "unsafe_url"
+    assert not result.error.retryable
+    assert result.attempts == 1
