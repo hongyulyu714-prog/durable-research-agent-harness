@@ -204,6 +204,19 @@ class ApprovalService:
         state.completed_call_ids.add(call.id)
         state.pending_approval = None
         state.approval_execution_started = False
+        if state.pending_calls:
+            next_call = state.pending_calls.pop(0)
+            state.pending_approval = next_call
+            self.store.save(state)
+            tracer.record(
+                "approval_requested",
+                state=state,
+                call_id=next_call.id,
+                tool=next_call.name,
+            )
+            tracer.write_summary(state)
+            return state
+
         previous = state.status
         state.transition_to(RunStatus.RUNNING)
         tracer.record(
@@ -212,6 +225,9 @@ class ApprovalService:
             from_status=previous.value,
             to_status=state.status.value,
         )
+        # The original assistant message is now fully settled: every tool call
+        # has a result, so the next loop turn may safely request the model.
+        state.step += 1
         self.store.save(state)
 
         if self.continuation is not None:
