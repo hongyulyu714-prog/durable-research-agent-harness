@@ -132,6 +132,9 @@ class AgentLoop:
 
         validation_results = list(self.registry.validate_calls(calls))
         self._validate_result_ids(validation_results, calls, source="validator")
+        validation_results = self._match_result_names(
+            validation_results, calls, source="validator"
+        )
         rejected_ids = {result.tool_call_id for result in validation_results}
         valid_calls = [call for call in calls if call.id not in rejected_ids]
 
@@ -143,6 +146,9 @@ class AgentLoop:
                     output = await output
                 execution_results = list(output)
                 self._validate_result_ids(execution_results, valid_calls, source="executor")
+                execution_results = self._match_result_names(
+                    execution_results, valid_calls, source="executor"
+                )
             except Exception as exc:
                 execution_results = [
                     ToolResult.failure(
@@ -176,3 +182,29 @@ class AgentLoop:
         unknown = set(ids) - expected
         if unknown:
             raise ValueError(f"{source} returned results for unknown call IDs: {sorted(unknown)}")
+
+    @staticmethod
+    def _match_result_names(
+        results: Sequence[ToolResult], calls: Sequence[ToolCall], *, source: str
+    ) -> list[ToolResult]:
+        """Reject results whose ID was preserved but whose tool identity was not."""
+
+        calls_by_id = {call.id: call for call in calls}
+        mismatch_kind = "execution_error" if source == "executor" else "validation_error"
+        matched: list[ToolResult] = []
+        for result in results:
+            call = calls_by_id[result.tool_call_id]
+            if result.tool_name == call.name:
+                matched.append(result)
+                continue
+            matched.append(
+                ToolResult.failure(
+                    call,
+                    kind=mismatch_kind,
+                    message=(
+                        f"{source} returned tool_name {result.tool_name!r} for "
+                        f"call {call.id!r}; expected {call.name!r}"
+                    ),
+                )
+            )
+        return matched

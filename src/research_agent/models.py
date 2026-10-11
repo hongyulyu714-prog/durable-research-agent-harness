@@ -7,6 +7,7 @@ as JSON and restored without an OpenAI client being installed or configured.
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -126,6 +127,15 @@ class ToolResult:
             raise ValueError("a successful tool result cannot carry an error")
         if not self.ok and self.error is None:
             raise ValueError("an unsuccessful tool result requires an error")
+        try:
+            # Round-tripping makes later message/checkpoint serialization safe
+            # even when a tool handed us a mutable mapping or a tuple.
+            normalized_data = json.loads(
+                json.dumps(self.data, ensure_ascii=False, allow_nan=False)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("tool result data must be JSON serializable") from exc
+        object.__setattr__(self, "data", normalized_data)
 
     @property
     def id(self) -> str:

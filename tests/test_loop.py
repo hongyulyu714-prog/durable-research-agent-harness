@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
+from pathlib import Path
 
 from research_agent.llm import LLMResponse, MockLLM
 from research_agent.loop import AgentLoop
@@ -80,3 +81,33 @@ def test_max_steps_stops_an_infinite_tool_loop() -> None:
     assert state.failure_reason == "max_steps_exceeded"
     assert state.step == 2
     assert len(llm.requests) == 2
+
+
+def test_non_json_tool_data_becomes_a_structured_execution_failure() -> None:
+    call = ToolCall(id="call_path", name="lookup", arguments={"query": "path"})
+    llm = MockLLM([LLMResponse.with_tool_calls([call]), LLMResponse.final("Recovered")])
+
+    async def execute(calls: Sequence[ToolCall]) -> list[ToolResult]:
+        return [ToolResult.success(calls[0], Path("not-json-serializable"))]
+
+    state = asyncio.run(AgentLoop(llm, FakeRegistry(), execute).run(RunState.new("Return a path")))
+
+    assert state.status is RunStatus.COMPLETED
+    result = json.loads(next(m for m in llm.requests[1][0] if m["role"] == "tool")["content"])
+    assert result["error"]["kind"] == "execution_error"
+    assert result["tool_name"] == "lookup"
+
+
+def test_executor_result_with_mismatched_tool_name_becomes_execution_failure() -> None:
+    call = ToolCall(id="call_lookup", name="lookup", arguments={"query": "name"})
+    llm = MockLLM([LLMResponse.with_tool_calls([call]), LLMResponse.final("Recovered")])
+
+    async def execute(_: Sequence[ToolCall]) -> list[ToolResult]:
+        return [ToolResult("call_lookup", "different_tool", True, {"unexpected": True})]
+
+    state = asyncio.run(AgentLoop(llm, FakeRegistry(), execute).run(RunState.new("Check name")))
+
+    assert state.status is RunStatus.COMPLETED
+    result = json.loads(next(m for m in llm.requests[1][0] if m["role"] == "tool")["content"])
+    assert result["error"]["kind"] == "execution_error"
+    assert result["tool_name"] == "lookup"
