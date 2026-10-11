@@ -460,3 +460,9 @@ model response #1 -> 工具 c1/c2/c3 -> 结构化结果回填 -> model response 
 - [ ] 每次运行保留状态与事件轨迹；pytest 覆盖核心状态转移。
 - [ ] README 让第三方可配置、运行、复核 demo 与理解边界。
 
+## 17. 交付实现对照
+
+当前代码将 `fetch_url` 注册为与 `read_file` 同级的只读并行工具；网络协议、DNS、重定向和响应大小限制均由工具自身负责。每个 Agent 工具批次在状态中记录批次耗时、单工具耗时总和和失败数，因此离线与真实运行的 JSONL 轨迹可核验独立工作是否重叠。`ApplicationService` 会把可恢复 `RunState.events` 以去重方式刷新到 `events.jsonl`，并与审批服务写入的状态转换、批准和写入事件共同形成完整轨迹。
+
+交付级离线场景位于 `tests/test_integration.py`：它使用 `MockLLM` 和受控工具复现“并发读文件/网页调用 → 一个网页失败 → 模型提出写入 → checkpoint 暂停 → 新服务批准恢复 → 最终回答”的完整路径。运行命令、结果与真实 API 演示的凭据前提见 [运行记录](运行记录.md)。
+

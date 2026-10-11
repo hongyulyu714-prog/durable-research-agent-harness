@@ -6,6 +6,7 @@ from pathlib import Path
 
 from research_agent.registry import ToolRegistry, ToolSpec
 from research_agent.tools.files import read_file, write_report
+from research_agent.tools.web import fetch_url
 
 
 def build_local_registry(*, workspace: Path | str | None = None) -> ToolRegistry:
@@ -23,6 +24,26 @@ def build_local_registry(*, workspace: Path | str | None = None) -> ToolRegistry
     async def write_report_in_workspace(path: str, content: str):
         return await write_report(path, content, workspace=workspace)
 
+    async def fetch_public_url(url: str):
+        return await fetch_url(url)
+
+    registry.register(
+        ToolSpec(
+            name="fetch_url",
+            description="Fetch bounded text from a public HTTP or HTTPS URL.",
+            parameters_schema={
+                "type": "object",
+                "properties": {"url": {"type": "string", "minLength": 1}},
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+            risk="read",
+            parallel_safe=True,
+            timeout_seconds=10.0,
+            max_retries=2,
+        ),
+        fetch_public_url,
+    )
     registry.register(
         ToolSpec(
             name="read_file",
@@ -63,4 +84,4 @@ def build_local_registry(*, workspace: Path | str | None = None) -> ToolRegistry
     return registry
 
 
-__all__ = ["build_local_registry", "read_file", "write_report"]
+__all__ = ["build_local_registry", "fetch_url", "read_file", "write_report"]
