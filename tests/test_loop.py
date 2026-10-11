@@ -19,7 +19,9 @@ class FakeRegistry:
         for call in calls:
             if call.name != "lookup":
                 outcomes.append(
-                    ToolResult.failure(call, kind="unknown_tool", message=f"unknown tool: {call.name}")
+                    ToolResult.failure(
+                        call, kind="unknown_tool", message=f"unknown tool: {call.name}"
+                    )
                 )
             elif not isinstance(call.arguments, dict) or "query" not in call.arguments:
                 outcomes.append(
@@ -32,7 +34,12 @@ class FakeRegistry:
 
 def test_loop_returns_tool_result_to_second_model_turn() -> None:
     call = ToolCall(id="call_lookup", name="lookup", arguments={"query": "Ada Lovelace"})
-    llm = MockLLM([LLMResponse.with_tool_calls([call]), LLMResponse.final("Ada Lovelace was a pioneer.")])
+    llm = MockLLM(
+        [
+            LLMResponse.with_tool_calls([call]),
+            LLMResponse.final("Ada Lovelace was a pioneer."),
+        ]
+    )
 
     async def execute(calls: Sequence[ToolCall]) -> list[ToolResult]:
         return [ToolResult.success(calls[0], {"fact": "first programmer"})]
@@ -52,7 +59,12 @@ def test_loop_returns_tool_result_to_second_model_turn() -> None:
 
 def test_invalid_calls_return_structured_results_and_loop_continues() -> None:
     bad_call = ToolCall(id="call_bad", name="not_registered", arguments={})
-    llm = MockLLM([LLMResponse.with_tool_calls([bad_call]), LLMResponse.final("I cannot use that tool.")])
+    llm = MockLLM(
+        [
+            LLMResponse.with_tool_calls([bad_call]),
+            LLMResponse.final("I cannot use that tool."),
+        ]
+    )
 
     async def execute(_: Sequence[ToolCall]) -> list[ToolResult]:
         raise AssertionError("invalid calls must not reach the executor")

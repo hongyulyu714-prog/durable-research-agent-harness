@@ -12,7 +12,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Protocol
 
-from research_agent.llm import LLMAdapter, LLMResponse
+from research_agent.llm import LLMAdapter
 from research_agent.models import RunState, RunStatus, ToolCall, ToolResult
 
 
@@ -29,7 +29,9 @@ class ToolRegistry(Protocol):
     def validate_calls(self, calls: Sequence[ToolCall]) -> Sequence[ToolResult]: ...
 
 
-ToolExecutor = Callable[[Sequence[ToolCall]], Awaitable[Sequence[ToolResult]] | Sequence[ToolResult]]
+ToolExecutor = Callable[
+    [Sequence[ToolCall]], Awaitable[Sequence[ToolResult]] | Sequence[ToolResult]
+]
 
 
 class ToolScheduler(Protocol):
@@ -71,9 +73,7 @@ class AgentLoop:
             raise ValueError("max_steps must be at least one")
         self.llm = llm
         self.registry = registry
-        self.executor: ToolExecutor = (
-            executor if callable(executor) else executor.execute
-        )
+        self.executor: ToolExecutor = executor if callable(executor) else executor.execute
         self.max_steps = max_steps
 
     async def run(self, state: RunState) -> RunState:
@@ -132,9 +132,7 @@ class AgentLoop:
 
         validation_results = list(self.registry.validate_calls(calls))
         self._validate_result_ids(validation_results, calls, source="validator")
-        validation_results = self._match_result_names(
-            validation_results, calls, source="validator"
-        )
+        validation_results = self._match_result_names(validation_results, calls, source="validator")
         rejected_ids = {result.tool_call_id for result in validation_results}
         valid_calls = [call for call in calls if call.id not in rejected_ids]
 

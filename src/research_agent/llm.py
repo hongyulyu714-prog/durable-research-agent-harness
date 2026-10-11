@@ -25,13 +25,13 @@ class LLMResponse:
         return self.content is not None and not self.tool_calls
 
     @classmethod
-    def final(cls, content: str) -> "LLMResponse":
+    def final(cls, content: str) -> LLMResponse:
         return cls(content=content)
 
     @classmethod
     def with_tool_calls(
         cls, tool_calls: Sequence[ToolCall], content: str | None = None
-    ) -> "LLMResponse":
+    ) -> LLMResponse:
         return cls(content=content, tool_calls=tuple(tool_calls))
 
     def assistant_message(self) -> dict[str, Any]:

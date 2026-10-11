@@ -8,12 +8,12 @@ as JSON and restored without an OpenAI client being installed or configured.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
-from typing import Any, Mapping
+from enum import StrEnum
+from typing import Any
 from uuid import uuid4
-
 
 JSONValue = str | int | float | bool | None | list["JSONValue"] | dict[str, "JSONValue"]
 
@@ -78,7 +78,7 @@ class ToolCall:
         }
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "ToolCall":
+    def from_dict(cls, value: Mapping[str, Any]) -> ToolCall:
         return cls(
             tool_call_id=value.get("tool_call_id", value.get("id")),
             tool_name=value.get("tool_name", value.get("name")),
@@ -98,7 +98,7 @@ class ToolError:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "ToolError":
+    def from_dict(cls, value: Mapping[str, Any]) -> ToolError:
         return cls(
             kind=str(value["kind"]),
             message=str(value["message"]),
@@ -130,9 +130,7 @@ class ToolResult:
         try:
             # Round-tripping makes later message/checkpoint serialization safe
             # even when a tool handed us a mutable mapping or a tuple.
-            normalized_data = json.loads(
-                json.dumps(self.data, ensure_ascii=False, allow_nan=False)
-            )
+            normalized_data = json.loads(json.dumps(self.data, ensure_ascii=False, allow_nan=False))
         except (TypeError, ValueError) as exc:
             raise ValueError("tool result data must be JSON serializable") from exc
         object.__setattr__(self, "data", normalized_data)
@@ -153,7 +151,7 @@ class ToolResult:
         *,
         attempts: int = 1,
         duration_ms: int = 0,
-    ) -> "ToolResult":
+    ) -> ToolResult:
         return cls(call.id, call.name, True, data, None, attempts, duration_ms)
 
     @classmethod
@@ -166,7 +164,7 @@ class ToolResult:
         retryable: bool = False,
         attempts: int = 0,
         duration_ms: int = 0,
-    ) -> "ToolResult":
+    ) -> ToolResult:
         return cls(
             call.id,
             call.name,
@@ -189,7 +187,7 @@ class ToolResult:
         }
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "ToolResult":
+    def from_dict(cls, value: Mapping[str, Any]) -> ToolResult:
         error = value.get("error")
         return cls(
             tool_call_id=str(value["tool_call_id"]),
@@ -202,7 +200,7 @@ class ToolResult:
         )
 
 
-class RunStatus(str, Enum):
+class RunStatus(StrEnum):
     RUNNING = "running"
     WAITING_APPROVAL = "waiting_approval"
     COMPLETED = "completed"
@@ -223,7 +221,7 @@ class Event:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "Event":
+    def from_dict(cls, value: Mapping[str, Any]) -> Event:
         return cls(
             kind=str(value["kind"]),
             step=int(value["step"]),
@@ -249,7 +247,7 @@ class RunState:
     events: list[Event] = field(default_factory=list)
 
     @classmethod
-    def new(cls, task: str, *, run_id: str | None = None) -> "RunState":
+    def new(cls, task: str, *, run_id: str | None = None) -> RunState:
         return cls(
             run_id=run_id or uuid4().hex,
             status=RunStatus.RUNNING,
@@ -278,7 +276,7 @@ class RunState:
         }
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "RunState":
+    def from_dict(cls, value: Mapping[str, Any]) -> RunState:
         pending_approval = value.get("pending_approval")
         return cls(
             run_id=str(value["run_id"]),
