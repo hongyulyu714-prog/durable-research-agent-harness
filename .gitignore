@@ -1,0 +1,19 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime artifacts: local and potentially sensitive.
+runs/*
+!runs/.gitkeep
+reports/*
+!reports/.gitkeep
+
+# Editor and operating-system files.
+.DS_Store
+.idea/
+.vscode/
