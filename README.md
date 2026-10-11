@@ -69,6 +69,8 @@ ruff check .
 
 `tests/test_integration.py` 是完整的离线验收路径。它使用 `MockLLM` 与受控异步工具，断言本地读取和网页调用实际重叠、网页故障不影响读取结果、写入在批准前不会执行、新的 `ApplicationService` 仅凭 checkpoint 恢复，以及 JSONL/summary 包含完整的 loop、批次、故障、审批与完成轨迹。测试不访问网络，也不需要 API Key。
 
+`tests/test_crash_recovery.py` 则是针对持久化语义的故障注入证明。它以真实的临时工作区文件验证两条路径：新的服务实例可仅凭 checkpoint 在批准后写入一次报告；若报告已写入但结果 checkpoint 尚未保存时模拟崩溃，新的服务实例会看到持久化的执行栅栏、拒绝盲目重试，并要求人工先检查目标文件。该设计避免把“至多一次”误表述为无法证明的 exactly-once 保证。
+
 ## 架构
 
 ```text
