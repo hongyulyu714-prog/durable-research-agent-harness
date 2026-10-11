@@ -24,6 +24,10 @@ class CheckpointError(RuntimeError):
     """A checkpoint is absent, malformed, or not safe to address."""
 
 
+class ApprovalRecoveryRequired(RuntimeError):
+    """A write may have happened before its result checkpoint was committed."""
+
+
 class StateStore:
     """Read and write ``runs/<run_id>/checkpoint.json`` atomically."""
 
@@ -131,7 +135,13 @@ class ApprovalService:
             raise ValueError("approval can only be requested from a running state")
         if call.id in state.completed_call_ids:
             raise ValueError("cannot request approval for an already completed call")
+        registered = self.registry.get(call.name)
+        if registered is None or registered.spec.risk != "write":
+            raise ValueError("approval can only be requested for a registered write tool")
+        if self.registry.validate_call(call) is not None:
+            raise ValueError("approval can only be requested for a valid tool call")
         state.pending_approval = call
+        state.approval_execution_started = False
         previous = state.status
         state.transition_to(RunStatus.WAITING_APPROVAL)
         self.store.save(state)
@@ -164,7 +174,24 @@ class ApprovalService:
         tracer = TraceRecorder(self.store.root, run_id)
         call = state.pending_approval
         if approve:
+            if state.approval_execution_started:
+                tracer.record(
+                    "approval_recovery_required",
+                    state=state,
+                    call_id=call.id,
+                    tool=call.name,
+                )
+                raise ApprovalRecoveryRequired(
+                    "the approved write may already have run; "
+                    "inspect the target before resolving it"
+                )
             tracer.record("approval_granted", state=state, call_id=call.id, tool=call.name)
+            # This checkpoint is the retry fence.  If the process fails after
+            # the side effect but before the result is saved, the next resume
+            # sees this marker and refuses to execute the write again.
+            state.approval_execution_started = True
+            self.store.save(state)
+            tracer.record("tool_execution_started", state=state, call_id=call.id, tool=call.name)
             result = await self._execute_persisted_call(state, call, tracer)
         else:
             reason = reject_reason or "approval rejected"
@@ -176,6 +203,7 @@ class ApprovalService:
         state.messages.append(_tool_result_message(result))
         state.completed_call_ids.add(call.id)
         state.pending_approval = None
+        state.approval_execution_started = False
         previous = state.status
         state.transition_to(RunStatus.RUNNING)
         tracer.record(
@@ -202,13 +230,12 @@ class ApprovalService:
                 kind="already_completed",
                 message="the persisted approval call was already completed; it was not run again",
             )
-        resolved = self.registry.resolve(call.name)
-        if resolved is None:
+        registered = self.registry.get(call.name)
+        if registered is None:
             return ToolResult.failure(
                 call, kind="unknown_tool", message=f"tool is not registered: {call.name}"
             )
-        spec, handler = resolved
-        if spec.risk != "write":
+        if registered.spec.risk != "write":
             return ToolResult.failure(
                 call,
                 kind="approval_not_required",
@@ -217,8 +244,7 @@ class ApprovalService:
         started = time.perf_counter()
         tracer.record("tool_started", state=state, call_id=call.id, tool=call.name)
         try:
-            value = handler(**call.arguments)
-            data = await value if inspect.isawaitable(value) else value
+            data = await self.registry.invoke(call)
         except Exception as exc:
             duration_ms = round((time.perf_counter() - started) * 1_000)
             result = ToolResult.failure(
@@ -238,9 +264,7 @@ class ApprovalService:
             )
             return result
         duration_ms = round((time.perf_counter() - started) * 1_000)
-        result = ToolResult(
-            call.id, call.name, True, data=data, attempts=1, duration_ms=duration_ms
-        )
+        result = ToolResult.success(call, data=data, attempts=1, duration_ms=duration_ms)
         tracer.record(
             "tool_finished",
             state=state,

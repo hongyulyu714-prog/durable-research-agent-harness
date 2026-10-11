@@ -52,3 +52,15 @@ pytest -q
 | `pytest` | 测试 | 否 |
 
 不使用 LangChain、LangGraph、OpenAI Agents SDK 或其他 Agent/Harness 框架。
+
+## 审批恢复与持久化边界
+
+写入工具不会被普通执行器直接调用：Agent loop 在验证完写入调用后，先把原始
+`tool_call_id`、工具名和参数原子保存到 `runs/<run_id>/checkpoint.json`，并暂停为
+`waiting_approval`。`research-agent resume <run_id> --approve` 只会执行该持久化调用；
+`--reject <reason>` 则把结构化 `approval_rejected` 结果回填给模型。
+
+批准前会额外落盘 `approval_execution_started`。若进程在副作用发生后、结果 checkpoint
+写入前中断，下一次恢复会拒绝自动重试该调用，要求人工检查目标再处置。这避免了把“至少一次”
+误称为 exactly-once；本地文件系统仍无法在不依赖下游幂等键或事务存储的情况下提供真正的
+端到端 exactly-once 保证。

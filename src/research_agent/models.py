@@ -242,6 +242,7 @@ class RunState:
     completed_call_ids: set[str] = field(default_factory=set)
     pending_calls: list[ToolCall] = field(default_factory=list)
     pending_approval: ToolCall | None = None
+    approval_execution_started: bool = False
     final_answer: str | None = None
     failure_reason: str | None = None
     events: list[Event] = field(default_factory=list)
@@ -258,6 +259,25 @@ class RunState:
     def record(self, kind: str, **data: JSONValue | Any) -> None:
         self.events.append(Event(kind=kind, step=self.step, data=dict(data)))
 
+    def transition_to(self, status: RunStatus) -> None:
+        """Apply a legal lifecycle transition without reviving terminal runs."""
+
+        allowed = {
+            RunStatus.RUNNING: {
+                RunStatus.WAITING_APPROVAL,
+                RunStatus.COMPLETED,
+                RunStatus.FAILED,
+                RunStatus.CANCELLED,
+            },
+            RunStatus.WAITING_APPROVAL: {RunStatus.RUNNING, RunStatus.CANCELLED},
+            RunStatus.COMPLETED: set(),
+            RunStatus.FAILED: set(),
+            RunStatus.CANCELLED: set(),
+        }
+        if status not in allowed[self.status]:
+            raise ValueError(f"illegal run-state transition: {self.status.value} -> {status.value}")
+        self.status = status
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
@@ -270,6 +290,7 @@ class RunState:
             "pending_approval": None
             if self.pending_approval is None
             else self.pending_approval.to_dict(),
+            "approval_execution_started": self.approval_execution_started,
             "final_answer": self.final_answer,
             "failure_reason": self.failure_reason,
             "events": [event.to_dict() for event in self.events],
@@ -278,7 +299,7 @@ class RunState:
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> RunState:
         pending_approval = value.get("pending_approval")
-        return cls(
+        state = cls(
             run_id=str(value["run_id"]),
             status=RunStatus(value["status"]),
             task=str(value["task"]),
@@ -289,7 +310,13 @@ class RunState:
             pending_approval=ToolCall.from_dict(pending_approval)
             if isinstance(pending_approval, Mapping)
             else None,
+            approval_execution_started=bool(value.get("approval_execution_started", False)),
             final_answer=value.get("final_answer"),
             failure_reason=value.get("failure_reason"),
             events=[Event.from_dict(event) for event in value.get("events", [])],
         )
+        if state.status is RunStatus.WAITING_APPROVAL and state.pending_approval is None:
+            raise ValueError("waiting_approval checkpoint has no pending_approval call")
+        if state.approval_execution_started and state.pending_approval is None:
+            raise ValueError("approval execution marker has no pending_approval call")
+        return state

@@ -17,6 +17,7 @@ from research_agent import __version__
 from research_agent.models import RunState
 from research_agent.registry import ToolRegistry
 from research_agent.state_store import ApprovalService, StateStore
+from research_agent.tools import build_local_registry
 from research_agent.trace import TraceRecorder
 
 
@@ -52,7 +53,7 @@ class ApplicationService:
         continuation: Callable[[RunState], Awaitable[RunState] | RunState] | None = None,
     ) -> None:
         self.store = store
-        self.registry = registry or ToolRegistry()
+        self.registry = registry or build_local_registry()
         self.start = start
         self.continuation = continuation
 

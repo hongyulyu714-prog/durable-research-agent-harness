@@ -28,6 +28,8 @@ class ToolRegistry(Protocol):
 
     def validate_calls(self, calls: Sequence[ToolCall]) -> Sequence[ToolResult]: ...
 
+    def get_spec(self, name: str) -> Any | None: ...
+
 
 ToolExecutor = Callable[
     [Sequence[ToolCall]], Awaitable[Sequence[ToolResult]] | Sequence[ToolResult]
@@ -40,6 +42,12 @@ class ToolScheduler(Protocol):
     def execute(
         self, calls: Sequence[ToolCall]
     ) -> Awaitable[Sequence[ToolResult]] | Sequence[ToolResult]: ...
+
+
+class ApprovalGate(Protocol):
+    """Durably pauses a run before a write-capable tool can execute."""
+
+    def request_approval(self, state: RunState, call: ToolCall) -> RunState: ...
 
 
 def tool_result_message(result: ToolResult) -> dict[str, str]:
@@ -68,6 +76,7 @@ class AgentLoop:
         executor: ToolExecutor | ToolScheduler,
         *,
         max_steps: int = 8,
+        approval_gate: ApprovalGate | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least one")
@@ -75,6 +84,7 @@ class AgentLoop:
         self.registry = registry
         self.executor: ToolExecutor = executor if callable(executor) else executor.execute
         self.max_steps = max_steps
+        self.approval_gate = approval_gate
 
     async def run(self, state: RunState) -> RunState:
         """Run only while active; terminal and paused states are left unchanged.
@@ -108,6 +118,10 @@ class AgentLoop:
                 break
 
             state.messages.append(response.assistant_message())
+            approval_call = self._approval_call(response.tool_calls)
+            if approval_call is not None:
+                self.approval_gate.request_approval(state, approval_call)
+                break
             results = await self._process_calls(response.tool_calls)
             for result in results:
                 state.messages.append(tool_result_message(result))
@@ -116,6 +130,26 @@ class AgentLoop:
             state.step += 1
 
         return state
+
+    def _approval_call(self, calls: Sequence[ToolCall]) -> ToolCall | None:
+        """Return the first validated write request when HITL is configured.
+
+        This check belongs before the executor.  The scheduler may reject
+        writes defensively, but it must never be the component that decides
+        whether a human approval checkpoint should be created.
+        """
+
+        if self.approval_gate is None:
+            return None
+        for call in calls:
+            spec = self.registry.get_spec(call.name)
+            if (
+                spec is not None
+                and spec.risk == "write"
+                and self.registry.validate_call(call) is None
+            ):
+                return call
+        return None
 
     async def _process_calls(self, calls: Sequence[ToolCall]) -> list[ToolResult]:
         """Validate, execute valid calls, and restore original call ordering."""
