@@ -53,6 +53,14 @@ pytest -q
 
 不使用 LangChain、LangGraph、OpenAI Agents SDK 或其他 Agent/Harness 框架。
 
+## 网页工具边界
+
+`fetch_url` 只读取 `http` / `https` 资源。请求发出前和每次重定向前都会拒绝
+localhost、回环、链路本地、私网、未指定地址及常见 metadata-service 目标；域名能够
+解析到这类地址时同样拒绝。响应通过流式读取，默认最多保留 1,000,000 字节并返回最多
+20,000 个字符，避免单个工具调用把超大响应完整载入内存。被安全策略拒绝的调用会作为
+不可重试的结构化 `unsafe_url` 工具失败回填给 Agent。
+
 ## 审批恢复与持久化边界
 
 写入工具不会被普通执行器直接调用：Agent loop 在验证完写入调用后，先把原始

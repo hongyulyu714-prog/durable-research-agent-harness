@@ -148,9 +148,10 @@ class AsyncToolScheduler:
             )
         if isinstance(exc, httpx.RequestError):
             return ToolError(kind="network_error", message=str(exc), retryable=True)
+        kind = getattr(exc, "kind", "exception")
         retryable = bool(getattr(exc, "retryable", False))
         return ToolError(
-            kind="exception",
+            kind=kind,
             message=f"{type(exc).__name__}: {exc}",
             retryable=retryable,
         )
