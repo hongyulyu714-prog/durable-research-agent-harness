@@ -352,19 +352,89 @@ python -m research_agent inspect <run_id>
 - 一次真实运行记录以及限制说明；
 - GitHub 调研参考和许可证/归属说明。
 
-## 13. GitHub 调研的具体借鉴与限制
+## 13. 高 star GitHub 调研：可借鉴模式与禁止边界
+
+以下 star 数由 GitHub API 于 **2026-10-11** 核验。选择这些项目不是为了将成熟框架包装后提交，而是为了从经大规模社区使用的设计中抽取最小、可解释的工程原则。题目明确禁止它们承担本项目的 Agent loop、核心工具调度或 Harness 状态编排。
+
+| 项目 | GitHub star（核验日） | 成熟设计中值得吸收的点 | 本项目的自实现落点 | 为什么不直接使用 |
+|---|---:|---|---|---|
+| [LangChain](https://github.com/langchain-ai/langchain) | 147,585 | 工具定义、模型适配和中间件分层的工程边界 | `llm.py`、`registry.py`、`policy.py` 维持清晰接口，避免把工具逻辑写进 CLI 或 prompt | LangChain 不得承担本项目的循环、调度或状态管理。 |
+| [OpenAI Cookbook](https://github.com/openai/openai-cookbook) | 76,548 | Function Calling 的基本协议：模型只提出调用；应用校验、执行，并以相同 call ID 回填结果后继续请求模型 | `AgentLoop` 显式维护 assistant tool-call message 与 role=`tool` 结果消息；无隐式自动执行 | Cookbook 是示例集合而不是本项目运行时框架；只使用基础 `openai` 客户端。 |
+| [Microsoft AutoGen](https://github.com/microsoft/autogen) | 61,344 | `save_state`/`load_state` 将**配置**与**运行时状态**分离；重启后从外置状态恢复 | `RunState` 只保存消息、步骤、待审批调用和已完成调用；工具/模型配置由新进程重新构建 | AutoGen 本身是题目所排除的 Agent framework，绝不作为依赖。 |
+| [LangGraph](https://github.com/langchain-ai/langgraph) | 43,045 | interrupt + checkpoint 的 HITL 模式；其文档特别提示中断后节点可能重新执行，因而副作用需可幂等 | 审批前落盘 `pending_approval`；恢复时只执行该快照调用；写操作不用自动重试，并使用稳定 call ID 去重 | LangGraph 不能接管本项目状态机；本项目用 JSON checkpoint 和自写状态迁移。 |
+| [openai-python](https://github.com/openai/openai-python) | 31,806 | `AsyncOpenAI` 与基础 API 的异步调用能力 | `llm.py` 只封装 `AsyncOpenAI`；项目自己决定何时下一轮、执行哪些工具或暂停 | 这是允许的基础 API SDK；它不拥有 Agent loop。 |
+| [Semantic Kernel](https://github.com/microsoft/semantic-kernel) | 28,640 | 函数调用前的 policy/filter 可阻止执行并返回拒绝结果，而不是让模型自行绕过 | `PolicyEngine` 在工具真正运行前返回 allow / require-approval / deny，并将拒绝包装为 ToolResult | Semantic Kernel 不进入依赖树，避免其自动函数调用能力接管控制链。 |
+| [Temporal](https://github.com/temporalio/temporal) | 23,594 | Durable execution 的三个关键概念：持久化检查点、长时间等待外部 signal、带幂等键的副作用 | `checkpoint.json`、CLI `resume` 和稳定 `tool_call_id` 提供 Prototype 级别的等价展示 | Temporal 是超出 6 小时范围的外部工作流平台；不需要部署服务。 |
+
+### 13.1 从高 star 项目提炼出的四个“可见亮点”
+
+#### 亮点 A：持久化审批恢复，而不是终端 `input()`
+
+LangGraph 与 AutoGen 都将“暂停后可恢复”视为运行时状态问题，而不是 UI 问题。本项目的差异化做法是将审批请求表示为**不可变的、带 call ID 的待执行快照**：
+
+```text
+LLM 提出 write_report(call_id=c42, path=..., content=...)
+    -> PolicyEngine 标记需审批
+    -> checkpoint.json 写入 c42 的原始参数
+    -> 新进程 resume --approve
+    -> 只执行 c42，且不重新请求 LLM 生成另一个写入
+```
+
+这既可展示跨进程恢复，也避开“恢复时重新执行整轮、导致重复副作用”的常见风险。测试将明确验证：审批前无文件；批准后只出现一次写入；拒绝生成 LLM 可见的 `approval_rejected` 结果。
+
+#### 亮点 B：并发但不牺牲失败隔离
+
+高层 Agent 框架常默认隐藏工具并发；本项目刻意将其变成可观测的 Harness 行为。`AsyncToolScheduler` 按工具元数据而不是模型的自我声明决定策略：
+
+- 只读、独立的 `read_file`/`fetch_url` 用 `asyncio.gather` 并发；
+- `Semaphore` 控制最大外部请求数；
+- 每个任务独立 timeout 和重试包装，异常变成 ToolResult；
+- 写入调用不进入并发批次，且必须先过审批；
+- JSONL trace 记录每个工具 started/finished 时间，测试用可控延迟证明总耗时接近最长单项而非所有项之和。
+
+这里刻意不直接使用未包装的 `TaskGroup`：其异常语义会取消同组的其他任务，违背“一个网页失败、其余资料仍可被模型使用”的研究任务需求。
+
+#### 亮点 C：轨迹级离线回归，而非只检查最终文案
+
+从高 star 项目之外的专门 Harness 实践中补充吸收“cassette / golden trajectory”测试模式。每个 `MockLLM` 场景预置模型响应，测试严格断言：
+
+```text
+model response #1 -> 工具 c1/c2/c3 -> 结构化结果回填 -> model response #2
+                                              -> approval requested -> resume -> final
+```
+
+这比“最终 Markdown 中含某个字符串”更能证明 Agent loop、错误传递和 HITL 状态语义真的正确，也避免真实模型的随机性令 CI 不稳定。
+
+#### 亮点 D：模型无权覆盖 Harness 策略
+
+借鉴 Semantic Kernel 的 function-approval 过滤思想，模型只能**提议**工具调用；真正的权限判断由项目代码完成。`ToolSpec` 固定定义 `risk`、`parallel_safe`、timeout 和 retry；`PolicyEngine` 固定定义允许目录与审批规则。即使外部网页诱导模型执行写入，受保护工具也不会因为模型文本而跳过策略。
+
+### 13.2 精简参考项目：直接对应的实现细节
+
+| 参考 | 使用场景 | 吸收的具体细节 |
+|---|---|---|
+| [OpenAI Cookbook：Function Calling](https://github.com/openai/openai-cookbook/blob/main/examples/How_to_call_functions_with_chat_models.ipynb) | 原生工具调用协议 | 校验 `tool_calls`、解析 arguments、保持 `tool_call_id` 对应关系、回填 tool message 后再次调用模型。 |
+| [AutoGen 状态持久化示例](https://github.com/microsoft/autogen/tree/main/python/samples/agentchat_fastapi) | checkpoint 数据范围 | 状态文件用于恢复运行，配置文件用于重新构建实例；二者不混淆。 |
+| [LangGraph interrupt 源码注释](https://github.com/langchain-ai/langgraph/blob/main/libs/langgraph/langgraph/types.py) | 恢复与幂等 | 中断后可能从节点开头重跑，因此任何写入工具都必须避免盲目重试；这是本项目稳定 call ID 的设计依据。 |
+| [Semantic Kernel 审批样例](https://github.com/microsoft/semantic-kernel/blob/main/dotnet/samples/Demos/FunctionInvocationApproval/Program.cs) | 策略拒绝语义 | 在工具执行前作决定；拒绝返回明确结果，而不是抛出未处理异常。 |
+| [Temporal Agent Harness 示例](https://github.com/mikeacjones/temporal-agent-harness-example) | 副作用与失败语义 | 读取类工具与写入类工具采用不同重试策略；预期异常转为 LLM 可见结果。 |
+| [Agent Prompt Shield](https://github.com/0xMrBlueOps/agent-prompt-shield) | 不可信工具输出边界 | 工具输出标记为数据、保留来源，并在高权限工具前执行策略门控。 |
+
+### 13.3 复用与归属原则
+
+1. **核心代码零复用**：不复制 LangChain、LangGraph、AutoGen、Semantic Kernel、Temporal 的 loop、自动工具执行、状态机或审批实现；这些均只用于设计对照。
+2. **允许的基础依赖**：仅使用 `openai`、`httpx`、`pydantic`、`pytest` 等不接管核心编排的库。
+3. **小型辅助片段也需核验**：若后续确有必要借用某段非核心代码，先确认许可证、保留所需 notice，并在 README 的 Attribution 小节标明来源与修改范围。
+4. **最终提交强调自主性**：README 会明确写出 “model proposes; harness validates, schedules, persists, and decides approval”，并链接到 `loop.py`、`scheduler.py`、`policy.py`、`state_store.py` 作为证据。
+
+## 14. GitHub 调研的具体借鉴与限制
 
 | 参考 | 借鉴内容 | 在本项目中的处理 |
 |---|---|---|
-| OpenAI Cookbook Function Calling | 由应用检查 tool call、执行函数、以相同 call ID 回填、再次请求模型 | 使用基础 `openai` SDK，但 loop 与分派自行实现。 |
 | `aafre/agentharness` | 将副作用记录为 event、状态与记录可检查/回放 | 不安装该包；自写简化的 JSONL event 与 RunState。 |
 | `nderman/agent-harness` | 轨迹断言、预录模型响应、故障注入测试 | 不复用 Agent runtime；采用 MockLLM 和 pytest fixture。 |
-| Temporal Agent Harness 示例 | 副作用工具使用稳定调用 ID；预期失败应作为数据返回 LLM | 不使用 Temporal；本地 JSON checkpoint 和保守写入策略实现原型。 |
-| Agent Prompt Shield | 将网页/工具输出视为不可信数据，策略门控敏感操作 | 不引入检测框架；仅实现明确的数据标记、路径限制与审批门。 |
 
-任何直接复制的非核心代码都必须在实现前确认上游许可证兼容性、保留 required notice，并在 README 的 Attribution 小节说明。优先选择自己实现短小且可解释的版本；本题的评分重点是项目自身 Harness 的控制与工程判断。
-
-## 14. 6 小时实施优先级
+## 15. 6 小时实施优先级
 
 | 优先级 | 内容 | 目标时间 |
 |---:|---|---:|
@@ -378,7 +448,7 @@ python -m research_agent inspect <run_id>
 
 若时间不足，绝不牺牲 P0 来换取界面、更多工具或多 Agent。完成 P0 已能严谨覆盖题目全部硬性要求，并以可恢复审批、失败隔离并发和离线轨迹测试形成差异化亮点。
 
-## 15. 验收标准
+## 16. 验收标准
 
 提交前逐项确认：
 
