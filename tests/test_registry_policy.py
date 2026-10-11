@@ -82,6 +82,7 @@ def test_schemas_are_openai_compatible_and_validation_is_model_visible(workspace
     schema = {item["function"]["name"]: item for item in registry.schemas()}
     assert schema["read_file"]["type"] == "function"
     assert schema["read_file"]["function"]["parameters"]["type"] == "object"
+    assert schema["fetch_url"]["function"]["parameters"]["required"] == ["url"]
 
     unknown = registry.validate_call(ToolCall(id="unknown", name="shell", arguments={}))
     assert unknown is not None

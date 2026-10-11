@@ -1,74 +1,100 @@
 # Durable Research Agent Harness
 
-一个从零实现的、支持工具调用、真实异步并发、人工审批与可恢复状态的 Python 研究 Agent 原型。
+一个从零实现的、可恢复的研究型 Agent 原型。模型提出工具调用，但多轮控制循环、并发调度、参数校验、人工审批、checkpoint 与运行轨迹均由本项目代码掌握；不使用 LangChain、LangGraph、OpenAI Agents SDK 或其他 Agent/Harness 框架。
 
-本项目的 Agent loop、工具调度、状态机和 Human-in-the-loop 由项目自身代码控制；`openai` 仅作为基础 OpenAI-compatible API 客户端使用。
+## 能力与边界
 
-> 当前仓库已完成工程骨架与设计文档，核心实现将在后续提交中逐步加入。
+- `read_file(path)`：只读取工作区 `data/` 下的 UTF-8 文本。
+- `fetch_url(url)`：异步读取公开 HTTP(S) 页面；拦截本地、私网、metadata 地址与不安全重定向，并限制响应大小。
+- `write_report(path, content)`：只写入工作区 `reports/`；必须经人工批准，普通调度器不会执行它。
+- 同一模型回合内，独立的只读工具并发执行。单个超时、网络错误或参数错误会变为结构化 `ToolResult`，不取消健康的同级调用。
+- 批准前完整调用会原子保存至 `runs/<run_id>/checkpoint.json`；`resume` 只执行这份保存的调用。
+- `events.jsonl` 和 `summary.json` 提供脱敏、可检查的轨迹。工具内容、参数正文与密钥不写入轨迹。
 
-## 快速开始（开发中）
+这不是 production-grade exactly-once 系统：若进程在写入完成、结果 checkpoint 落盘前崩溃，恢复会拒绝盲目重试，要求先人工检查目标文件。
+
+## 安装与配置
+
+需要 Python 3.11 或更高版本。
 
 ```bash
-python -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env
-research-agent --help
+set -a; source .env; set +a
 ```
 
-## 仓库结构
+`.env` 需要 `OPENAI_API_KEY` 与 `OPENAI_MODEL`；`OPENAI_BASE_URL` 默认为 OpenAI API 地址。请勿提交 `.env`、含私密任务正文的 checkpoint 或未审核的网页资料。
 
-```text
-src/research_agent/      # Harness 核心：loop、状态、策略、调度器和工具
-tests/                   # 离线、确定性的单元与集成测试
-data/                    # 只读演示资料
-reports/                 # Agent 批准后生成的报告（默认不提交）
-runs/                    # checkpoint 和 JSONL 运行轨迹（默认不提交）
-examples/                # 可复现实验和 demo 输入
-docs/                    # 原题、设计方案、后续运行记录
-```
+## 运行、审批与检查
 
-## 设计文档
-
-- [详细实现方案](docs/Agent_Harness_详细方案.md)
-- [原始题目](docs/Take-home试题（智能体方向）.md)
-
-## 计划中的 CLI
+准备一个工具工作区：
 
 ```bash
-research-agent run "阅读资料并生成研究简报"
-research-agent resume <run_id> --approve
-research-agent inspect <run_id>
-pytest -q
+mkdir -p demo-workspace/data demo-workspace/reports demo-runs
+printf 'Durable execution makes research workflows inspectable.\n' > demo-workspace/data/source.txt
 ```
 
-## 依赖与边界
+```bash
+research-agent --runs-dir demo-runs run \
+  "Read source.txt, check one public source, then write a concise Markdown brief." \
+  --workspace demo-workspace
+```
 
-| 依赖 | 用途 | 是否控制核心执行链 |
+当输出为 `waiting_approval: <run_id>` 时，可在新进程中批准已持久化的写入：
+
+```bash
+research-agent --runs-dir demo-runs resume <run_id> --approve --workspace demo-workspace
+```
+
+或拒绝它，并将原因作为结构化工具结果回填给模型：
+
+```bash
+research-agent --runs-dir demo-runs resume <run_id> --reject "请先缩短为三段" --workspace demo-workspace
+```
+
+`inspect` 不需要 API 凭据：
+
+```bash
+research-agent --runs-dir demo-runs inspect <run_id>
+```
+
+## 离线验证
+
+```bash
+pytest -q
+ruff check .
+```
+
+`tests/test_integration.py` 是完整的离线验收路径。它使用 `MockLLM` 与受控异步工具，断言本地读取和网页调用实际重叠、网页故障不影响读取结果、写入在批准前不会执行、新的 `ApplicationService` 仅凭 checkpoint 恢复，以及 JSONL/summary 包含完整的 loop、批次、故障、审批与完成轨迹。测试不访问网络，也不需要 API Key。
+
+## 架构
+
+```text
+CLI (run / resume / inspect)
+        |
+        v
+AgentLoop -- OpenAICompatibleLLM / MockLLM
+        |
+        +-- ToolRegistry -- read_file / fetch_url / write_report
+        |        |
+        |        +-- AsyncToolScheduler (并发、timeout、retry、失败隔离)
+        |
+        +-- ApprovalService -- StateStore (原子 checkpoint)
+        |
+        +-- TraceRecorder (脱敏 JSONL 与 summary)
+```
+
+`ToolSpec` 是策略信任边界：模型的文字不能改变写入审批、并发、重试或路径范围。每个工具批次会记录总耗时与所有单工具耗时之和；当前者更小时，可从轨迹核验独立调用发生了重叠。
+
+## 依赖
+
+| 依赖 | 用途 | 是否掌握 Agent 控制链 |
 |---|---|---:|
-| `openai` | 基础 LLM API 调用 | 否 |
-| `httpx` | 异步网页请求 | 否 |
-| `pydantic` | 数据和参数校验 | 否 |
-| `pytest` | 测试 | 否 |
+| `openai` | 基础 OpenAI-compatible Chat Completions 客户端 | 否 |
+| `httpx` | `fetch_url` 的异步 HTTP I/O | 否 |
+| `pydantic` | 可选的数据模型/输入校验依赖 | 否 |
+| `pytest`、`pytest-asyncio`、`ruff` | 开发期离线验证与检查 | 否 |
 
-不使用 LangChain、LangGraph、OpenAI Agents SDK 或其他 Agent/Harness 框架。
-
-## 网页工具边界
-
-`fetch_url` 只读取 `http` / `https` 资源。请求发出前和每次重定向前都会拒绝
-localhost、回环、链路本地、私网、未指定地址及常见 metadata-service 目标；域名能够
-解析到这类地址时同样拒绝。响应通过流式读取，默认最多保留 1,000,000 字节并返回最多
-20,000 个字符，避免单个工具调用把超大响应完整载入内存。被安全策略拒绝的调用会作为
-不可重试的结构化 `unsafe_url` 工具失败回填给 Agent。
-
-## 审批恢复与持久化边界
-
-写入工具不会被普通执行器直接调用：Agent loop 在验证完写入调用后，先把原始
-`tool_call_id`、工具名和参数原子保存到 `runs/<run_id>/checkpoint.json`，并暂停为
-`waiting_approval`。`research-agent resume <run_id> --approve` 只会执行该持久化调用；
-`--reject <reason>` 则把结构化 `approval_rejected` 结果回填给模型。
-
-批准前会额外落盘 `approval_execution_started`。若进程在副作用发生后、结果 checkpoint
-写入前中断，下一次恢复会拒绝自动重试该调用，要求人工检查目标再处置。这避免了把“至少一次”
-误称为 exactly-once；本地文件系统仍无法在不依赖下游幂等键或事务存储的情况下提供真正的
-端到端 exactly-once 保证。
+完整的设计取舍见 [详细实现方案](docs/Agent_Harness_详细方案.md)，可复验的交付证据见 [运行记录](docs/运行记录.md)。

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Protocol
 
@@ -127,12 +128,17 @@ class AgentLoop:
                 automatic_calls = [
                     call for call in response.tool_calls if call.id not in pending_ids
                 ]
-                self._append_results(state, await self._process_calls(automatic_calls))
+                started = time.perf_counter()
+                automatic_results = await self._process_calls(automatic_calls)
+                self._append_results(state, automatic_results)
+                self._record_batch(state, automatic_results, time.perf_counter() - started)
                 state.pending_calls = pending_writes[1:]
                 self.approval_gate.request_approval(state, pending_writes[0])
                 break
+            started = time.perf_counter()
             results = await self._process_calls(response.tool_calls)
             self._append_results(state, results)
+            self._record_batch(state, results, time.perf_counter() - started)
             state.step += 1
 
         return state
@@ -163,7 +169,36 @@ class AgentLoop:
         for result in results:
             state.messages.append(tool_result_message(result))
             state.completed_call_ids.add(result.tool_call_id)
-            state.record("tool_result", tool_call_id=result.tool_call_id, ok=result.ok)
+            state.record(
+                "tool_result",
+                tool_call_id=result.tool_call_id,
+                tool_name=result.tool_name,
+                ok=result.ok,
+                attempts=result.attempts,
+                duration_ms=result.duration_ms,
+                error_kind=None if result.error is None else result.error.kind,
+            )
+
+    @staticmethod
+    def _record_batch(
+        state: RunState, results: Sequence[ToolResult], elapsed_seconds: float
+    ) -> None:
+        """Record enough timing information to inspect concurrency after a run.
+
+        The sum of per-tool durations can exceed the batch duration only when
+        independent work overlapped.  Both numbers remain metadata-only; no
+        tool arguments or output content are written into the trace.
+        """
+
+        if not results:
+            return
+        state.record(
+            "tool_batch_completed",
+            call_count=len(results),
+            duration_ms=round(elapsed_seconds * 1_000),
+            aggregate_tool_duration_ms=sum(result.duration_ms for result in results),
+            failed_call_count=sum(not result.ok for result in results),
+        )
 
     async def _process_calls(self, calls: Sequence[ToolCall]) -> list[ToolResult]:
         """Validate, execute valid calls, and restore original call ordering."""

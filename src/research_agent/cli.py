@@ -75,13 +75,19 @@ class ApplicationService:
         state = self.start(task)
         state = await state if asyncio.iscoroutine(state) else state
         self.store.save(state)
-        TraceRecorder(self.store.root, state.run_id).write_summary(state)
+        recorder = TraceRecorder(self.store.root, state.run_id)
+        recorder.record_state_events(state)
+        recorder.write_summary(state)
         return state
 
     async def resume(self, run_id: str, *, approve: bool, reject_reason: str | None) -> RunState:
-        return await ApprovalService(
+        state = await ApprovalService(
             self.store, self.registry, continuation=self.continuation
         ).resume(run_id, approve=approve, reject_reason=reject_reason)
+        recorder = TraceRecorder(self.store.root, state.run_id)
+        recorder.record_state_events(state)
+        recorder.write_summary(state)
+        return state
 
     def inspect(self, run_id: str) -> dict[str, Any]:
         state = self.store.load(run_id)

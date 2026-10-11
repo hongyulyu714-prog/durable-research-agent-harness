@@ -80,11 +80,46 @@ class TraceRecorder:
                 records.append(record)
         return records
 
+    def record_state_events(self, state: RunState) -> None:
+        """Persist each in-memory loop event once, without copying tool content.
+
+        A run can be saved at a human-approval boundary and resumed in another
+        process.  ``RunState.events`` is the durable source of loop events, so
+        the timestamped serialized event is used as a stable de-duplication
+        key when the application service flushes it more than once.
+        """
+
+        existing_ids = {
+            record.get("state_event_id")
+            for record in self.events()
+            if record.get("source") == "run_state"
+        }
+        for state_event in state.events:
+            payload = state_event.to_dict()
+            canonical = json.dumps(
+                payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            event_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+            if event_id in existing_ids:
+                continue
+            self.record(
+                state_event.kind,
+                state=state,
+                source="run_state",
+                state_event_id=event_id,
+                event_at=state_event.at,
+                **state_event.data,
+            )
+            existing_ids.add(event_id)
+
     def summary(self, state: RunState) -> dict[str, Any]:
         records = self.events()
         types = Counter(str(record.get("type", "unknown")) for record in records)
         failures = sum(
-            1 for record in records if record.get("type") in {"tool_error", "tool_failed"}
+            1
+            for record in records
+            if record.get("type") in {"tool_error", "tool_failed"}
+            or (record.get("type") == "tool_result" and record.get("ok") is False)
         )
         decisions = [
             record["type"]
